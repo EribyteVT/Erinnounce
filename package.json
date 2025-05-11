@@ -5,9 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "ts-node bot.ts",
-    "build": "tsc",
-    "prod": "npm run build && node dist/bot.js"
+    "prod": "node bot.js"
   },
   "keywords": [],
   "author": "",

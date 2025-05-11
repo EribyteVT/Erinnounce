@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APPLICATION_NAME}
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: ${APPLICATION_NAME}
+    spec:
+      containers:
+        - name: ${APPLICATION_NAME}
+          image: eribyteofficial/erinnounce
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          env:
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${SECRET_NAME}
+                  key: DISCORD_BOT_TOKEN
+            - name: user
+              valueFrom:
+                secretKeyRef:
+                  name: ${SECRET_NAME}
+                  key: DB_USER
+            - name: password
+              valueFrom:
+                secretKeyRef:
+                  name: ${SECRET_NAME}
+                  key: DB_PASSWORD
+            - name: host
+              valueFrom:
+                configMapKeyRef:
+                  name: ${CONFIG_NAME}
+                  key: DB_HOST
+            - name: database
+              valueFrom:
+                configMapKeyRef:
+                  name: ${CONFIG_NAME}
+                  key: DB_NAME
+            - name: port
+              valueFrom:
+                configMapKeyRef:
+                  name: ${CONFIG_NAME}
+                  key: DB_PORT
+
+  selector:
+    matchLabels:
+      app: ${APPLICATION_NAME}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APPLICATION_NAME}
+spec:
+  type: NodePort
+  selector:
+    app: ${APPLICATION_NAME}
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 3000
