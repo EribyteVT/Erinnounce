@@ -50,16 +50,3 @@ spec:
   selector:
     matchLabels:
       app: ${APPLICATION_NAME}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${APPLICATION_NAME}
-spec:
-  type: NodePort
-  selector:
-    app: ${APPLICATION_NAME}
-  ports:
-    - protocol: TCP
-      port: 3000
-      targetPort: 3000
