@@ -1,15 +1,6 @@
 {
-  "envs": ["stage", "prod"],
+  "envs": ["prod"],
   "configs": [
-    {
-      "env": "stage",
-      "templateParams": {
-        "APPLICATION_NAME": "erinnounce-stage",
-        "SECRET_NAME": "erinnounce-secrets-stage",
-        "CONFIG_NAME": "erinnounce-config-stage"
-      }
-    },
-
     {
       "env": "prod",
       "templateParams": {

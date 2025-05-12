@@ -3,8 +3,8 @@ import pg from "pg";
 
 let server_channels = [];
 let all_input_channels = [];
-
 let all_roles = [];
+let webhooks_cache = new Map(); // Cache webhooks to avoid creating duplicates
 
 const pgClient = new pg.Pool({
   user: process.env.user,
@@ -49,13 +49,8 @@ client.once(Events.ClientReady, (readyClient) => {
 
 async function getChannelsFromDatabase() {
   try {
-    // Connect to the database
     await pgClient.connect();
-
-    // Example query - modify this to match your database schema
     const result = await pgClient.query("SELECT * FROM alerts.channels");
-
-    // Return the rows from the query
     return result.rows;
   } catch (error) {
     console.error("Database connection error:", error);
@@ -65,13 +60,8 @@ async function getChannelsFromDatabase() {
 
 async function getRolesFromDatabase() {
   try {
-    // Connect to the database
     await pgClient.connect();
-
-    // Example query - modify this to match your database schema
     const result = await pgClient.query("SELECT * FROM alerts.roles");
-
-    // Return the rows from the query
     return result.rows;
   } catch (error) {
     console.error("Database connection error:", error);
@@ -109,36 +99,93 @@ function getRoleFromServerAndType(serverId, type) {
   return correct_type_role;
 }
 
-client.on("messageCreate", (message) => {
+// Create or get a webhook for a channel
+async function getOrCreateWebhook(channel) {
+  const cacheKey = channel.id;
+
+  if (webhooks_cache.has(cacheKey)) {
+    return webhooks_cache.get(cacheKey);
+  }
+
+  try {
+    // Check if a webhook already exists for this channel
+    const webhooks = await channel.fetchWebhooks();
+    let webhook = webhooks.find((wh) => wh.name === "Erinnounce Relay");
+
+    if (!webhook) {
+      // Create a new webhook if none exists
+      webhook = await channel.createWebhook({
+        name: "Erinnounce Relay",
+        reason:
+          "Webhook for message relaying with custom avatars and usernames",
+      });
+      console.log(`Created new webhook for channel ${channel.name}`);
+    }
+
+    webhooks_cache.set(cacheKey, webhook);
+    return webhook;
+  } catch (error) {
+    console.error(
+      `Error getting/creating webhook for channel ${channel.name}:`,
+      error
+    );
+    return null;
+  }
+}
+
+client.on("messageCreate", async (message) => {
   const channel = message.channelId;
 
-  console.log(all_input_channels);
-
   if (!all_input_channels.includes(channel)) {
-    console.log("not in");
     return;
   }
 
-  console.log("in a good channel");
-
   const channel_info = getChannelInfo(channel);
-
   const server = message.guildId;
-
   const allwithout = getAllServersWithout(server, channel_info.channel_type);
 
-  console.log(allwithout);
+  // Get the original author's avatar URL (with fallback to default avatar)
+  const avatarURL = message.guild.iconURL() || message.author.defaultAvatarURL;
 
-  allwithout.forEach((server) => {
+  // Create a username that includes the origin server name
+  const customUsername = `From ${message.guild.name}`;
+
+  for (const server of allwithout) {
     console.log(`sending to ${server.server_id}`);
-    let role = getRoleFromServerAndType(
+
+    const role = getRoleFromServerAndType(
       server.server_id,
       channel_info.channel_type
     );
-
     const outputChannel = client.channels.cache.get(server.channel_id_output);
-    outputChannel.send(`<@&${role.role_id}> ${message.content}`);
-  });
+
+    if (!outputChannel) {
+      console.error(
+        `Could not find output channel ${server.channel_id_output}`
+      );
+      continue;
+    }
+
+    try {
+      const webhook = await getOrCreateWebhook(outputChannel);
+
+      if (webhook) {
+        // Send message using webhook with custom avatar and username
+        await webhook.send({
+          content: `<@&${role.role_id}> ${message.content}`,
+          username: customUsername,
+          avatarURL: avatarURL,
+        });
+        console.log(`Message sent via webhook to ${outputChannel.name}`);
+      } else {
+        // Fallback to regular send if webhook creation fails
+        await outputChannel.send(`<@&${role.role_id}> ${message.content}`);
+        console.log(`Message sent (fallback) to ${outputChannel.name}`);
+      }
+    } catch (error) {
+      console.error(`Error sending message to ${outputChannel.name}:`, error);
+    }
+  }
 });
 
 client.login(process.env.DISCORD_BOT_TOKEN);
