@@ -99,6 +99,13 @@ function getRoleFromServerAndType(serverId, type) {
   return correct_type_role;
 }
 
+function containsLink(message) {
+  // Regular expression to match URLs
+  const urlRegex =
+    /(https?:\/\/[^\s]+|www\.[^\s]+|[^\s]+\.[a-z]{2,}(?:\/[^\s]*)?)/gi;
+  return urlRegex.test(message);
+}
+
 // Create or get a webhook for a channel
 async function getOrCreateWebhook(channel) {
   const cacheKey = channel.id;
@@ -137,6 +144,11 @@ client.on("messageCreate", async (message) => {
   const channel = message.channelId;
 
   if (!all_input_channels.includes(channel)) {
+    return;
+  }
+
+  if (!containsLink(message.content)) {
+    console.log("Message does not contain a link, skipping...");
     return;
   }
 
