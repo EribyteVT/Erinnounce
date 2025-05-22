@@ -5,13 +5,13 @@ import {
   SlashCommandBuilder,
   REST,
   Routes,
+  AttachmentBuilder,
 } from "discord.js";
 import pg from "pg";
 
 let server_channels = [];
 let all_input_channels = [];
 let all_roles = [];
-let webhooks_cache = new Map(); // Cache webhooks to avoid creating duplicates
 
 // Configuration for retry logic
 const RETRY_CONFIG = {
@@ -135,6 +135,115 @@ async function retryWithBackoff(
   throw lastError;
 }
 
+// Function to download and prepare attachments for forwarding
+async function prepareAttachments(message) {
+  const attachments = [];
+
+  if (message.attachments && message.attachments.size > 0) {
+    for (const [, attachment] of message.attachments) {
+      try {
+        // For most use cases, we can reference the attachment URL directly
+        // Discord handles the attachment forwarding automatically
+        attachments.push(
+          new AttachmentBuilder(attachment.url, { name: attachment.name })
+        );
+      } catch (error) {
+        console.warn(
+          `Failed to prepare attachment ${attachment.name}:`,
+          error.message
+        );
+        // Continue with other attachments if one fails
+      }
+    }
+  }
+
+  return attachments;
+}
+
+// Enhanced message forwarding function
+async function forwardMessageToServer(
+  server,
+  message,
+  channelInfo,
+  originalGuild
+) {
+  const serverId = server.server_id;
+  const serverName = `Server ${serverId}`;
+
+  try {
+    const role = getRoleFromServerAndType(serverId, channelInfo.channel_type);
+    if (!role) {
+      throw new Error(
+        `No role found for server ${serverId} and type ${channelInfo.channel_type}`
+      );
+    }
+
+    const outputChannel = client.channels.cache.get(server.channel_id_output);
+    if (!outputChannel) {
+      throw new Error(
+        `Could not find output channel ${server.channel_id_output}`
+      );
+    }
+
+    // Prepare the forwarded message data
+    const forwardData = {
+      content: `<@&${role.role_id}> **From ${originalGuild.name}:**\n${
+        message.content || ""
+      }`,
+      embeds: [...(message.embeds || [])],
+      files: await prepareAttachments(message),
+    };
+
+    // Add source information to the message if it doesn't have embeds
+    if (message.embeds.length === 0 && message.content) {
+      // Create a simple embed to show the source
+      forwardData.embeds.push({
+        color: 0x5865f2, // Discord's blurple color
+        author: {
+          name: `${message.author.username} in ${originalGuild.name}`,
+          icon_url: message.author.displayAvatarURL(),
+        },
+        timestamp: message.createdAt.toISOString(),
+        footer: {
+          text: `Forwarded from #${message.channel.name}`,
+        },
+      });
+    } else if (message.embeds.length > 0) {
+      // If there are embeds, add source info to the first embed
+      const firstEmbed = { ...forwardData.embeds[0] };
+      if (!firstEmbed.footer) {
+        firstEmbed.footer = {};
+      }
+      firstEmbed.footer.text = `Forwarded from ${originalGuild.name} • ${
+        firstEmbed.footer.text || ""
+      }`.trim();
+      forwardData.embeds[0] = firstEmbed;
+    }
+
+    // Remove any empty content to avoid sending empty messages
+    if (!forwardData.content.trim() && forwardData.embeds.length === 0) {
+      forwardData.content = `<@&${role.role_id}> **From ${originalGuild.name}:** *(Message with attachments)*`;
+    }
+
+    // Send the forwarded message with retry logic
+    await retryWithBackoff(
+      () => outputChannel.send(forwardData),
+      `Forwarding message to ${outputChannel.name} in ${serverName}`
+    );
+
+    console.log(
+      `✅ Message forwarded to ${outputChannel.name} in ${serverName}`
+    );
+    return { success: true, method: "forward" };
+  } catch (error) {
+    console.error(
+      `❌ Failed to forward message to ${serverName} after all retries:`,
+      error.message
+    );
+    return { success: false, error: error.message, serverId };
+  }
+}
+
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Ready! Logged in as ${readyClient.user.tag}`);
 
@@ -251,22 +360,34 @@ async function handleTestCommand(interaction) {
             color: 0x0099ff,
           },
         ],
+        attachments: new Map(),
         guildId: serverId,
         guild: null, // Will be set later
         author: {
+          username: "TestUser",
+          displayAvatarURL: () =>
+            "https://cdn.discordapp.com/embed/avatars/0.png",
           defaultAvatarURL: "https://cdn.discordapp.com/embed/avatars/0.png",
         },
+        channel: { name: "test-channel" },
+        createdAt: new Date(),
       };
     } else {
       // Create a regular message
       mockMessage = {
         content: messageContent,
         embeds: [],
+        attachments: new Map(),
         guildId: serverId,
         guild: null, // Will be set later
         author: {
+          username: "TestUser",
+          displayAvatarURL: () =>
+            "https://cdn.discordapp.com/embed/avatars/0.png",
           defaultAvatarURL: "https://cdn.discordapp.com/embed/avatars/0.png",
         },
+        channel: { name: "test-channel" },
+        createdAt: new Date(),
       };
     }
 
@@ -310,7 +431,7 @@ async function handleTestCommand(interaction) {
 
     const mode = dryRun ? "🔍 **DRY RUN**" : "🧪 **LIVE TEST**";
     const testType = testEmbed ? "(Embed Test)" : "(Message Test)";
-    let response = `${mode} ${testType} - Message Relay Simulation\n\n`;
+    let response = `${mode} ${testType} - Message Forward Simulation\n\n`;
     response += `📤 **Source:** ${sourceGuild.name} (${serverId})\n`;
     response += `📝 **Channel:** <#${channelId}> (${channelInfo.channel_type})\n`;
 
@@ -348,11 +469,11 @@ async function handleTestCommand(interaction) {
         response += `${serverInfo}\n`;
       }
 
-      response += `\n💡 Use \`dry_run: false\` to actually send test messages.`;
+      response += `\n💡 Use \`dry_run: false\` to actually forward test messages.`;
       response += `\n🔗 Use \`test_embed: true\` to test with embed links.`;
     } else {
-      // Live test - actually send messages
-      response += `🚀 **Sending test messages...**\n`;
+      // Live test - actually forward messages
+      response += `🚀 **Forwarding test messages...**\n`;
 
       await interaction.editReply({ content: response });
 
@@ -361,22 +482,17 @@ async function handleTestCommand(interaction) {
         total: targetServers.length,
         successful: 0,
         failed: 0,
-        webhookSent: 0,
-        fallbackSent: 0,
+        forwardSent: 0,
         failedServers: [],
       };
 
       // Process all servers
       const sendPromises = targetServers.map((server) =>
-        sendMessageToServer(server, mockMessage, channelInfo, sourceGuild)
+        forwardMessageToServer(server, mockMessage, channelInfo, sourceGuild)
           .then((result) => {
             if (result.success) {
               results.successful++;
-              if (result.method === "webhook") {
-                results.webhookSent++;
-              } else {
-                results.fallbackSent++;
-              }
+              results.forwardSent++;
             } else {
               results.failed++;
               results.failedServers.push({
@@ -387,7 +503,7 @@ async function handleTestCommand(interaction) {
             return result;
           })
           .catch((error) => {
-            console.error("Unexpected error in sendMessageToServer:", error);
+            console.error("Unexpected error in forwardMessageToServer:", error);
             results.failed++;
             results.failedServers.push({
               serverId: server.server_id,
@@ -407,7 +523,7 @@ async function handleTestCommand(interaction) {
       // Update with results
       response += `\n✅ **Test Complete**\n`;
       response += `📊 **Summary:** ${results.successful}/${results.total} successful\n`;
-      response += `• Webhook: ${results.webhookSent} | Fallback: ${results.fallbackSent} | Failed: ${results.failed}`;
+      response += `• Forwarded: ${results.forwardSent} | Failed: ${results.failed}`;
 
       if (results.failed > 0) {
         response += `\n❌ **Failed Servers:** ${results.failedServers
@@ -518,21 +634,22 @@ async function handleRetryCommand(interaction) {
       return;
     }
 
-    console.log(`📤 Retrying message relay to ${allwithout.length} servers...`);
+    console.log(
+      `📤 Retrying message forward to ${allwithout.length} servers...`
+    );
 
     // Track results
     const results = {
       total: allwithout.length,
       successful: 0,
       failed: 0,
-      webhookSent: 0,
-      fallbackSent: 0,
+      forwardSent: 0,
       failedServers: [],
     };
 
     // Process all servers concurrently
     const sendPromises = allwithout.map((server) =>
-      sendMessageToServer(
+      forwardMessageToServer(
         server,
         targetMessage,
         channel_info,
@@ -541,11 +658,7 @@ async function handleRetryCommand(interaction) {
         .then((result) => {
           if (result.success) {
             results.successful++;
-            if (result.method === "webhook") {
-              results.webhookSent++;
-            } else {
-              results.fallbackSent++;
-            }
+            results.forwardSent++;
           } else {
             results.failed++;
             results.failedServers.push({
@@ -556,7 +669,7 @@ async function handleRetryCommand(interaction) {
           return result;
         })
         .catch((error) => {
-          console.error("Unexpected error in sendMessageToServer:", error);
+          console.error("Unexpected error in forwardMessageToServer:", error);
           results.failed++;
           results.failedServers.push({
             serverId: server.server_id,
@@ -576,7 +689,7 @@ async function handleRetryCommand(interaction) {
     // Update the interaction with results
     let resultMessage = `✅ **Retry Complete**\n`;
     resultMessage += `📊 **Summary:** ${results.successful}/${results.total} successful\n`;
-    resultMessage += `• Webhook: ${results.webhookSent} | Fallback: ${results.fallbackSent} | Failed: ${results.failed}`;
+    resultMessage += `• Forwarded: ${results.forwardSent} | Failed: ${results.failed}`;
 
     if (results.failed > 0) {
       resultMessage += `\n❌ **Failed Servers:** ${results.failedServers
@@ -728,121 +841,6 @@ function containsLink(message) {
   return false;
 }
 
-// Enhanced webhook function with retry logic
-async function getOrCreateWebhook(channel) {
-  const cacheKey = channel.id;
-
-  if (webhooks_cache.has(cacheKey)) {
-    return webhooks_cache.get(cacheKey);
-  }
-
-  try {
-    const webhook = await retryWithBackoff(async () => {
-      // Check if a webhook already exists for this channel
-      const webhooks = await channel.fetchWebhooks();
-      let webhook = webhooks.find((wh) => wh.name === "Erinnounce Relay");
-
-      if (!webhook) {
-        // Create a new webhook if none exists
-        webhook = await channel.createWebhook({
-          name: "Erinnounce Relay",
-          reason:
-            "Webhook for message relaying with custom avatars and usernames",
-        });
-        console.log(`Created new webhook for channel ${channel.name}`);
-      }
-
-      return webhook;
-    }, `Getting/creating webhook for channel ${channel.name}`);
-
-    webhooks_cache.set(cacheKey, webhook);
-    return webhook;
-  } catch (error) {
-    console.error(
-      `Failed to get/create webhook for channel ${channel.name} after all retries:`,
-      error
-    );
-    return null;
-  }
-}
-
-// Enhanced message sending function with retry logic
-async function sendMessageToServer(
-  server,
-  message,
-  channelInfo,
-  originalGuild
-) {
-  const serverId = server.server_id;
-  const serverName = `Server ${serverId}`;
-
-  try {
-    const role = getRoleFromServerAndType(serverId, channelInfo.channel_type);
-    if (!role) {
-      throw new Error(
-        `No role found for server ${serverId} and type ${channelInfo.channel_type}`
-      );
-    }
-
-    const outputChannel = client.channels.cache.get(server.channel_id_output);
-    if (!outputChannel) {
-      throw new Error(
-        `Could not find output channel ${server.channel_id_output}`
-      );
-    }
-
-    // Get the original guild's avatar URL (with fallback to default avatar)
-    const avatarURL =
-      originalGuild.iconURL() || message.author.defaultAvatarURL;
-    const customUsername = `From ${originalGuild.name}`;
-    const messageContent = `<@&${role.role_id}> ${message.content}`;
-
-    // Try to send via webhook first, with retry
-    try {
-      const webhook = await getOrCreateWebhook(outputChannel);
-
-      if (webhook) {
-        await retryWithBackoff(
-          () =>
-            webhook.send({
-              content: messageContent,
-              username: customUsername,
-              avatarURL: avatarURL,
-            }),
-          `Sending webhook message to ${outputChannel.name} in ${serverName}`
-        );
-
-        console.log(
-          `✅ Message sent via webhook to ${outputChannel.name} in ${serverName}`
-        );
-        return { success: true, method: "webhook" };
-      }
-    } catch (webhookError) {
-      console.warn(
-        `Webhook failed for ${serverName}, trying fallback method:`,
-        webhookError.message
-      );
-    }
-
-    // Fallback to regular send with retry
-    await retryWithBackoff(
-      () => outputChannel.send(messageContent),
-      `Sending fallback message to ${outputChannel.name} in ${serverName}`
-    );
-
-    console.log(
-      `✅ Message sent (fallback) to ${outputChannel.name} in ${serverName}`
-    );
-    return { success: true, method: "fallback" };
-  } catch (error) {
-    console.error(
-      `❌ Failed to send message to ${serverName} after all retries:`,
-      error.message
-    );
-    return { success: false, error: error.message, serverId };
-  }
-}
-
 client.on("messageCreate", async (message) => {
   const channel = message.channelId;
 
@@ -864,29 +862,24 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  console.log(`📤 Relaying message to ${allwithout.length} servers...`);
+  console.log(`📤 Forwarding message to ${allwithout.length} servers...`);
 
   // Track results
   const results = {
     total: allwithout.length,
     successful: 0,
     failed: 0,
-    webhookSent: 0,
-    fallbackSent: 0,
+    forwardSent: 0,
     failedServers: [],
   };
 
   // Process all servers concurrently but with individual error handling
   const sendPromises = allwithout.map((server) =>
-    sendMessageToServer(server, message, channel_info, message.guild)
+    forwardMessageToServer(server, message, channel_info, message.guild)
       .then((result) => {
         if (result.success) {
           results.successful++;
-          if (result.method === "webhook") {
-            results.webhookSent++;
-          } else {
-            results.fallbackSent++;
-          }
+          results.forwardSent++;
         } else {
           results.failed++;
           results.failedServers.push({
@@ -898,7 +891,7 @@ client.on("messageCreate", async (message) => {
       })
       .catch((error) => {
         // This shouldn't happen due to our error handling, but just in case
-        console.error("Unexpected error in sendMessageToServer:", error);
+        console.error("Unexpected error in forwardMessageToServer:", error);
         results.failed++;
         results.failedServers.push({
           serverId: server.server_id,
@@ -918,10 +911,10 @@ client.on("messageCreate", async (message) => {
 
     // Log summary
     console.log(
-      `Relay Summary: ${results.successful}/${results.total} successful`
+      `Forward Summary: ${results.successful}/${results.total} successful`
     );
     console.log(
-      `   • Webhook: ${results.webhookSent}, Fallback: ${results.fallbackSent}, Failed: ${results.failed}`
+      `   • Forwarded: ${results.forwardSent}, Failed: ${results.failed}`
     );
 
     if (results.failed > 0) {
@@ -932,7 +925,7 @@ client.on("messageCreate", async (message) => {
       );
     }
   } catch (error) {
-    console.error("Unexpected error during message relay:", error);
+    console.error("Unexpected error during message forwarding:", error);
   }
 });
 
