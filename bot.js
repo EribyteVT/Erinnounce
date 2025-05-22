@@ -47,6 +47,37 @@ const commands = [
         .setDescription("The ID of the message to retry")
         .setRequired(true)
     ),
+  new SlashCommandBuilder()
+    .setName("test")
+    .setDescription("Test message relay simulation")
+    .addStringOption((option) =>
+      option
+        .setName("server_id")
+        .setDescription("Source server ID to simulate message from")
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName("channel_id")
+        .setDescription("Source channel ID to simulate message from")
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName("message_content")
+        .setDescription(
+          "Test message content (will add a test link if none provided)"
+        )
+        .setRequired(false)
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName("dry_run")
+        .setDescription(
+          "If true, only simulate without actually sending messages"
+        )
+        .setRequired(false)
+    ),
 ].map((command) => command.toJSON());
 
 // Utility function to sleep for a given duration
@@ -155,8 +186,199 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.commandName === "retry") {
     await handleRetryCommand(interaction);
+  } else if (interaction.commandName === "test") {
+    await handleTestCommand(interaction);
   }
 });
+
+async function handleTestCommand(interaction) {
+  const serverId = interaction.options.getString("server_id");
+  const channelId = interaction.options.getString("channel_id");
+  const messageContent =
+    interaction.options.getString("message_content") ||
+    "Test message with link: https://example.com";
+  const dryRun = interaction.options.getBoolean("dry_run") ?? true; // Default to dry run
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    // Validate server and channel IDs format
+    if (!/^\d{17,19}$/.test(serverId) || !/^\d{17,19}$/.test(channelId)) {
+      await interaction.editReply({
+        content:
+          "❌ Invalid server or channel ID format. Please provide valid Discord IDs.",
+      });
+      return;
+    }
+
+    // Check if the channel is configured as an input channel
+    const channelInfo = getChannelInfo(channelId);
+    if (!channelInfo) {
+      await interaction.editReply({
+        content: `❌ Channel ${channelId} is not configured as an input channel.`,
+      });
+      return;
+    }
+
+    // Check if the server matches the channel's configured server
+    if (channelInfo.server_id !== serverId) {
+      await interaction.editReply({
+        content: `❌ Channel ${channelId} belongs to server ${channelInfo.server_id}, not ${serverId}.`,
+      });
+      return;
+    }
+
+    // Check if message contains a link
+    if (!containsLink(messageContent)) {
+      await interaction.editReply({
+        content: `❌ Test message does not contain any links. Current content: "${messageContent}"`,
+      });
+      return;
+    }
+
+    // Get target servers
+    const targetServers = getAllServersWithout(
+      serverId,
+      channelInfo.channel_type
+    );
+
+    if (targetServers.length === 0) {
+      await interaction.editReply({
+        content: `❌ No target servers found for channel type "${channelInfo.channel_type}" (excluding source server ${serverId}).`,
+      });
+      return;
+    }
+
+    // Get source guild information (for simulation)
+    let sourceGuild;
+    try {
+      sourceGuild = await client.guilds.fetch(serverId);
+    } catch (error) {
+      await interaction.editReply({
+        content: `❌ Could not fetch source server ${serverId}. Make sure the bot is in that server.`,
+      });
+      return;
+    }
+
+    const mode = dryRun ? "🔍 **DRY RUN**" : "🧪 **LIVE TEST**";
+    let response = `${mode} - Message Relay Simulation\n\n`;
+    response += `📤 **Source:** ${sourceGuild.name} (${serverId})\n`;
+    response += `📝 **Channel:** <#${channelId}> (${channelInfo.channel_type})\n`;
+    response += `💬 **Message:** "${messageContent}"\n`;
+    response += `🎯 **Target Servers:** ${targetServers.length}\n\n`;
+
+    if (dryRun) {
+      // Dry run - just show what would happen
+      response += `**📋 Target Server Details:**\n`;
+
+      for (const server of targetServers) {
+        const role = getRoleFromServerAndType(
+          server.server_id,
+          channelInfo.channel_type
+        );
+        let serverInfo = `• Server ${server.server_id}`;
+
+        try {
+          const targetGuild = await client.guilds.fetch(server.server_id);
+          serverInfo = `• ${targetGuild.name} (${server.server_id})`;
+        } catch (error) {
+          serverInfo += ` ⚠️ (Bot not in server)`;
+        }
+
+        serverInfo += `\n  └─ Channel: <#${server.channel_id_output}>`;
+        serverInfo += `\n  └─ Role: ${
+          role ? `<@&${role.role_id}>` : "❌ No role found"
+        }`;
+
+        response += `${serverInfo}\n`;
+      }
+
+      response += `\n💡 Use \`dry_run: false\` to actually send test messages.`;
+    } else {
+      // Live test - actually send messages
+      response += `🚀 **Sending test messages...**\n`;
+
+      await interaction.editReply({ content: response });
+
+      // Create a mock message object
+      const mockMessage = {
+        content: messageContent,
+        guildId: serverId,
+        guild: sourceGuild,
+        author: {
+          defaultAvatarURL: "https://cdn.discordapp.com/embed/avatars/0.png",
+        },
+      };
+
+      // Track results
+      const results = {
+        total: targetServers.length,
+        successful: 0,
+        failed: 0,
+        webhookSent: 0,
+        fallbackSent: 0,
+        failedServers: [],
+      };
+
+      // Process all servers
+      const sendPromises = targetServers.map((server) =>
+        sendMessageToServer(server, mockMessage, channelInfo, sourceGuild)
+          .then((result) => {
+            if (result.success) {
+              results.successful++;
+              if (result.method === "webhook") {
+                results.webhookSent++;
+              } else {
+                results.fallbackSent++;
+              }
+            } else {
+              results.failed++;
+              results.failedServers.push({
+                serverId: result.serverId,
+                error: result.error,
+              });
+            }
+            return result;
+          })
+          .catch((error) => {
+            console.error("Unexpected error in sendMessageToServer:", error);
+            results.failed++;
+            results.failedServers.push({
+              serverId: server.server_id,
+              error: error.message,
+            });
+            return {
+              success: false,
+              error: error.message,
+              serverId: server.server_id,
+            };
+          })
+      );
+
+      // Wait for all sends to complete
+      await Promise.all(sendPromises);
+
+      // Update with results
+      response += `\n✅ **Test Complete**\n`;
+      response += `📊 **Summary:** ${results.successful}/${results.total} successful\n`;
+      response += `• Webhook: ${results.webhookSent} | Fallback: ${results.fallbackSent} | Failed: ${results.failed}`;
+
+      if (results.failed > 0) {
+        response += `\n❌ **Failed Servers:** ${results.failedServers
+          .map((f) => f.serverId)
+          .join(", ")}`;
+      }
+    }
+
+    await interaction.editReply({ content: response });
+  } catch (error) {
+    console.error("Error in test command:", error);
+    await interaction.editReply({
+      content:
+        "❌ An error occurred during the test. Please check the logs for details.",
+    });
+  }
+}
 
 async function handleRetryCommand(interaction) {
   const messageId = interaction.options.getString("message_id");
