@@ -8,6 +8,14 @@
         "SECRET_NAME": "erinnounce-secrets-prod",
         "CONFIG_NAME": "erinnounce-config-prod"
       }
+    },
+    {
+      "env": "stage",
+      "templateParams": {
+        "APPLICATION_NAME": "erinnounce-stage",
+        "SECRET_NAME": "erinnounce-secrets-stage",
+        "CONFIG_NAME": "erinnounce-config-stage"
+      }
     }
   ]
 }
