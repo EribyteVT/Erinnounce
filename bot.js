@@ -161,6 +161,7 @@ async function prepareAttachments(message) {
 }
 
 // Enhanced message forwarding function
+// Enhanced message forwarding function with improved embed handling
 async function forwardMessageToServer(
   server,
   message,
@@ -185,18 +186,94 @@ async function forwardMessageToServer(
       );
     }
 
+    // Create base content with role ping and source info
+    const baseContent = `<@&${role.role_id}> **From ${originalGuild.name}:**`;
+
     // Prepare the forwarded message data
     const forwardData = {
-      content: `<@&${role.role_id}> **From ${originalGuild.name}:**\n${
-        message.content || ""
-      }`,
-      embeds: [...(message.embeds || [])],
+      content: baseContent,
+      embeds: [],
       files: await prepareAttachments(message),
     };
 
-    // Add source information to the message if it doesn't have embeds
-    if (message.embeds.length === 0 && message.content) {
-      // Create a simple embed to show the source
+    // Handle original message content
+    if (message.content && message.content.trim()) {
+      forwardData.content += `\n${message.content}`;
+    }
+
+    // Handle embeds - create deep copies and preserve all embed data
+    if (message.embeds && message.embeds.length > 0) {
+      console.log(
+        `📎 Processing ${message.embeds.length} embed(s) for forwarding...`
+      );
+
+      for (let i = 0; i < message.embeds.length; i++) {
+        const originalEmbed = message.embeds[i];
+
+        // Create a deep copy of the embed to avoid reference issues
+        const forwardedEmbed = {
+          title: originalEmbed.title || undefined,
+          description: originalEmbed.description || undefined,
+          url: originalEmbed.url || undefined,
+          color: originalEmbed.color || undefined,
+          timestamp: originalEmbed.timestamp || undefined,
+          fields: originalEmbed.fields ? [...originalEmbed.fields] : undefined,
+          author: originalEmbed.author
+            ? {
+                name: originalEmbed.author.name,
+                url: originalEmbed.author.url,
+                icon_url:
+                  originalEmbed.author.iconURL || originalEmbed.author.icon_url,
+              }
+            : undefined,
+          thumbnail: originalEmbed.thumbnail
+            ? {
+                url: originalEmbed.thumbnail.url,
+              }
+            : undefined,
+          image: originalEmbed.image
+            ? {
+                url: originalEmbed.image.url,
+              }
+            : undefined,
+          footer: originalEmbed.footer
+            ? {
+                text: originalEmbed.footer.text,
+                icon_url:
+                  originalEmbed.footer.iconURL || originalEmbed.footer.icon_url,
+              }
+            : undefined,
+        };
+
+        // Remove undefined properties to clean up the embed
+        Object.keys(forwardedEmbed).forEach((key) => {
+          if (forwardedEmbed[key] === undefined) {
+            delete forwardedEmbed[key];
+          }
+        });
+
+        // Add source information to the first embed's footer
+        if (i === 0) {
+          if (!forwardedEmbed.footer) {
+            forwardedEmbed.footer = {};
+          }
+
+          const sourceInfo = `Forwarded from ${originalGuild.name}`;
+          if (forwardedEmbed.footer.text) {
+            forwardedEmbed.footer.text = `${sourceInfo} • ${forwardedEmbed.footer.text}`;
+          } else {
+            forwardedEmbed.footer.text = sourceInfo;
+          }
+        }
+
+        forwardData.embeds.push(forwardedEmbed);
+      }
+
+      console.log(
+        `✅ Prepared ${forwardData.embeds.length} embed(s) for forwarding`
+      );
+    } else {
+      // If no embeds in original message, create a source info embed
       forwardData.embeds.push({
         color: 0x5865f2, // Discord's blurple color
         author: {
@@ -208,38 +285,57 @@ async function forwardMessageToServer(
           text: `Forwarded from #${message.channel.name}`,
         },
       });
-    } else if (message.embeds.length > 0) {
-      // If there are embeds, add source info to the first embed
-      const firstEmbed = { ...forwardData.embeds[0] };
-      if (!firstEmbed.footer) {
-        firstEmbed.footer = {};
-      }
-      firstEmbed.footer.text = `Forwarded from ${originalGuild.name} • ${
-        firstEmbed.footer.text || ""
-      }`.trim();
-      forwardData.embeds[0] = firstEmbed;
     }
 
-    // Remove any empty content to avoid sending empty messages
-    if (!forwardData.content.trim() && forwardData.embeds.length === 0) {
-      forwardData.content = `<@&${role.role_id}> **From ${originalGuild.name}:** *(Message with attachments)*`;
+    // Ensure we don't send empty messages
+    if (
+      !forwardData.content.trim() &&
+      forwardData.embeds.length === 0 &&
+      forwardData.files.length === 0
+    ) {
+      forwardData.content = `${baseContent} *(Message with attachments)*`;
     }
+
+    // Log what we're about to send for debugging
+    console.log(`📤 Forwarding to ${serverName}:`, {
+      contentLength: forwardData.content.length,
+      embedCount: forwardData.embeds.length,
+      fileCount: forwardData.files.length,
+      hasEmbedUrls: forwardData.embeds.some((embed) => embed.url),
+    });
 
     // Send the forwarded message with retry logic
-    await retryWithBackoff(
+    const sentMessage = await retryWithBackoff(
       () => outputChannel.send(forwardData),
       `Forwarding message to ${outputChannel.name} in ${serverName}`
     );
 
     console.log(
-      `✅ Message forwarded to ${outputChannel.name} in ${serverName}`
+      `✅ Message forwarded to ${outputChannel.name} in ${serverName} (ID: ${sentMessage.id})`
     );
-    return { success: true, method: "forward" };
+
+    // Verify the forwarded message has embeds if expected
+    if (message.embeds.length > 0 && sentMessage.embeds.length === 0) {
+      console.warn(
+        `⚠️ Warning: Original message had ${message.embeds.length} embeds, but forwarded message has none!`
+      );
+    }
+
+    return { success: true, method: "forward", messageId: sentMessage.id };
   } catch (error) {
     console.error(
       `❌ Failed to forward message to ${serverName} after all retries:`,
       error.message
     );
+
+    // Log additional error details for debugging
+    if (error.code) {
+      console.error(`   Error code: ${error.code}`);
+    }
+    if (error.httpStatus) {
+      console.error(`   HTTP Status: ${error.httpStatus}`);
+    }
+
     return { success: false, error: error.message, serverId };
   }
 }
@@ -304,7 +400,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === "retry") {
     await handleRetryCommand(interaction);
   } else if (interaction.commandName === "test") {
-    await handleTestCommand(interaction);
+    await handleTestCommandWithDebug(interaction);
   }
 });
 
@@ -774,46 +870,73 @@ function getRoleFromServerAndType(serverId, type) {
 }
 
 function containsLink(message) {
-  // Regular expression to match URLs
+  // Enhanced regular expression to match URLs
   const urlRegex =
-    /(https?:\/\/[^\s]+|www\.[^\s]+|[^\s]+\.[a-z]{2,}(?:\/[^\s]*)?)/gi;
+    /(https?:\/\/[^\s<>]+|www\.[^\s<>]+|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]*\.[a-z]{2,}(?:\/[^\s<>]*)?)/gi;
 
   // Check message content first
   if (typeof message === "string") {
-    return urlRegex.test(message);
+    const hasLink = urlRegex.test(message);
+    console.log(`🔍 String link check: ${hasLink}`);
+    return hasLink;
   }
+
+  let linkFound = false;
+  const linkSources = [];
 
   // For Discord message objects, check content
   if (message.content && urlRegex.test(message.content)) {
-    return true;
+    linkFound = true;
+    linkSources.push("message content");
   }
 
-  // Check embeds for links
+  // Check embeds for links with detailed logging
   if (message.embeds && message.embeds.length > 0) {
-    for (const embed of message.embeds) {
+    console.log(`🔍 Checking ${message.embeds.length} embed(s) for links...`);
+
+    for (let i = 0; i < message.embeds.length; i++) {
+      const embed = message.embeds[i];
+      console.log(`   📎 Checking embed ${i + 1}:`, {
+        hasUrl: !!embed.url,
+        hasTitle: !!embed.title,
+        hasDescription: !!embed.description,
+        hasFields: embed.fields ? embed.fields.length : 0,
+        hasFooter: !!embed.footer,
+        hasAuthor: !!embed.author,
+      });
+
       // Check embed URL
       if (embed.url && urlRegex.test(embed.url)) {
-        return true;
+        linkFound = true;
+        linkSources.push(`embed ${i + 1} URL`);
+        console.log(`   ✅ Found link in embed ${i + 1} URL: ${embed.url}`);
       }
 
       // Check embed title
       if (embed.title && urlRegex.test(embed.title)) {
-        return true;
+        linkFound = true;
+        linkSources.push(`embed ${i + 1} title`);
+        console.log(`   ✅ Found link in embed ${i + 1} title: ${embed.title}`);
       }
 
       // Check embed description
       if (embed.description && urlRegex.test(embed.description)) {
-        return true;
+        linkFound = true;
+        linkSources.push(`embed ${i + 1} description`);
+        console.log(`   ✅ Found link in embed ${i + 1} description`);
       }
 
       // Check embed fields
       if (embed.fields && embed.fields.length > 0) {
-        for (const field of embed.fields) {
+        for (let j = 0; j < embed.fields.length; j++) {
+          const field = embed.fields[j];
           if (
             (field.name && urlRegex.test(field.name)) ||
             (field.value && urlRegex.test(field.value))
           ) {
-            return true;
+            linkFound = true;
+            linkSources.push(`embed ${i + 1} field ${j + 1}`);
+            console.log(`   ✅ Found link in embed ${i + 1} field ${j + 1}`);
           }
         }
       }
@@ -824,21 +947,47 @@ function containsLink(message) {
         embed.footer.text &&
         urlRegex.test(embed.footer.text)
       ) {
-        return true;
+        linkFound = true;
+        linkSources.push(`embed ${i + 1} footer`);
+        console.log(`   ✅ Found link in embed ${i + 1} footer`);
       }
 
       // Check embed author
-      if (
-        embed.author &&
-        embed.author.name &&
-        urlRegex.test(embed.author.name)
-      ) {
-        return true;
+      if (embed.author) {
+        if (embed.author.name && urlRegex.test(embed.author.name)) {
+          linkFound = true;
+          linkSources.push(`embed ${i + 1} author name`);
+          console.log(`   ✅ Found link in embed ${i + 1} author name`);
+        }
+        if (embed.author.url && urlRegex.test(embed.author.url)) {
+          linkFound = true;
+          linkSources.push(`embed ${i + 1} author URL`);
+          console.log(`   ✅ Found link in embed ${i + 1} author URL`);
+        }
       }
     }
   }
 
-  return false;
+  // Check for attachment URLs (these might contain links)
+  if (message.attachments && message.attachments.size > 0) {
+    for (const [, attachment] of message.attachments) {
+      if (attachment.url && urlRegex.test(attachment.url)) {
+        linkFound = true;
+        linkSources.push("attachment URL");
+        console.log(`   ✅ Found link in attachment: ${attachment.name}`);
+      }
+    }
+  }
+
+  console.log(`🔍 Link detection result: ${linkFound}`, {
+    sources: linkSources,
+    messageId: message.id || "unknown",
+    hasContent: !!message.content,
+    embedCount: message.embeds ? message.embeds.length : 0,
+    attachmentCount: message.attachments ? message.attachments.size : 0,
+  });
+
+  return linkFound;
 }
 
 client.on("messageCreate", async (message) => {
@@ -962,5 +1111,265 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
   process.exit(1);
 });
+
+// Debug function to analyze message structure and embeds
+function debugMessage(message, label = "Message Debug") {
+  console.log(`\n🐛 ${label} - Message Analysis:`);
+  console.log(`   Message ID: ${message.id}`);
+  console.log(`   Author: ${message.author.username}`);
+  console.log(
+    `   Content Length: ${message.content ? message.content.length : 0}`
+  );
+  console.log(`   Has Content: ${!!message.content}`);
+  console.log(`   Embed Count: ${message.embeds ? message.embeds.length : 0}`);
+  console.log(
+    `   Attachment Count: ${message.attachments ? message.attachments.size : 0}`
+  );
+
+  if (message.content) {
+    console.log(
+      `   Content Preview: "${message.content.substring(0, 100)}${
+        message.content.length > 100 ? "..." : ""
+      }"`
+    );
+  }
+
+  if (message.embeds && message.embeds.length > 0) {
+    console.log(`\n   📎 Embed Details:`);
+    message.embeds.forEach((embed, index) => {
+      console.log(`     Embed ${index + 1}:`);
+      console.log(`       Title: ${embed.title ? `"${embed.title}"` : "None"}`);
+      console.log(
+        `       Description: ${
+          embed.description
+            ? `"${embed.description.substring(0, 50)}..."`
+            : "None"
+        }`
+      );
+      console.log(`       URL: ${embed.url || "None"}`);
+      console.log(`       Color: ${embed.color || "None"}`);
+      console.log(`       Timestamp: ${embed.timestamp || "None"}`);
+      console.log(`       Fields: ${embed.fields ? embed.fields.length : 0}`);
+      console.log(
+        `       Author: ${embed.author ? embed.author.name : "None"}`
+      );
+      console.log(
+        `       Thumbnail: ${embed.thumbnail ? embed.thumbnail.url : "None"}`
+      );
+      console.log(`       Image: ${embed.image ? embed.image.url : "None"}`);
+      console.log(
+        `       Footer: ${embed.footer ? embed.footer.text : "None"}`
+      );
+
+      // Check if this embed has any links
+      const embedHasLinks = containsLink({ embeds: [embed] });
+      console.log(`       Contains Links: ${embedHasLinks}`);
+    });
+  }
+
+  if (message.attachments && message.attachments.size > 0) {
+    console.log(`\n   📎 Attachment Details:`);
+    message.attachments.forEach((attachment, index) => {
+      console.log(
+        `     Attachment ${index + 1}: ${attachment.name} (${attachment.url})`
+      );
+    });
+  }
+
+  console.log(`\n   🔗 Overall Link Detection: ${containsLink(message)}\n`);
+}
+
+// Enhanced test command handler with better debugging
+async function handleTestCommandWithDebug(interaction) {
+  const serverId = interaction.options.getString("server_id");
+  const channelId = interaction.options.getString("channel_id");
+  const messageContent =
+    interaction.options.getString("message_content") ||
+    "Test message with link: https://example.com";
+  const dryRun = interaction.options.getBoolean("dry_run") ?? true;
+  const testEmbed = interaction.options.getBoolean("test_embed") ?? false;
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    // Validate server and channel IDs format
+    if (!/^\d{17,19}$/.test(serverId) || !/^\d{17,19}$/.test(channelId)) {
+      await interaction.editReply({
+        content:
+          "❌ Invalid server or channel ID format. Please provide valid Discord IDs.",
+      });
+      return;
+    }
+
+    // Check if the channel is configured as an input channel
+    const channelInfo = getChannelInfo(channelId);
+    if (!channelInfo) {
+      await interaction.editReply({
+        content: `❌ Channel ${channelId} is not configured as an input channel.`,
+      });
+      return;
+    }
+
+    // Create mock message object for testing
+    let mockMessage;
+    if (testEmbed) {
+      mockMessage = {
+        id: "test-message-" + Date.now(),
+        content: "Test message with embed",
+        embeds: [
+          {
+            title: "Test Embed",
+            description: "This embed contains a link: https://example.com",
+            url: "https://example.com",
+            color: 0x0099ff,
+            timestamp: new Date().toISOString(),
+            author: {
+              name: "Test Author",
+              url: "https://example.com/author",
+            },
+            footer: {
+              text: "Test Footer",
+            },
+          },
+        ],
+        attachments: new Map(),
+        guildId: serverId,
+        guild: null,
+        author: {
+          username: "TestUser",
+          displayAvatarURL: () =>
+            "https://cdn.discordapp.com/embed/avatars/0.png",
+        },
+        channel: { name: "test-channel" },
+        createdAt: new Date(),
+      };
+    } else {
+      mockMessage = {
+        id: "test-message-" + Date.now(),
+        content: messageContent,
+        embeds: [],
+        attachments: new Map(),
+        guildId: serverId,
+        guild: null,
+        author: {
+          username: "TestUser",
+          displayAvatarURL: () =>
+            "https://cdn.discordapp.com/embed/avatars/0.png",
+        },
+        channel: { name: "test-channel" },
+        createdAt: new Date(),
+      };
+    }
+
+    // Debug the mock message
+    debugMessage(mockMessage, "Mock Test Message");
+
+    // Check if message contains a link
+    if (!containsLink(mockMessage)) {
+      const messageType = testEmbed ? "Test embed" : "Test message";
+      await interaction.editReply({
+        content: `❌ ${messageType} does not contain any links according to link detection.`,
+      });
+      return;
+    }
+
+    // Get target servers
+    const targetServers = getAllServersWithout(
+      serverId,
+      channelInfo.channel_type
+    );
+
+    if (targetServers.length === 0) {
+      await interaction.editReply({
+        content: `❌ No target servers found for channel type "${channelInfo.channel_type}".`,
+      });
+      return;
+    }
+
+    // Get source guild information
+    let sourceGuild;
+    try {
+      sourceGuild = await client.guilds.fetch(serverId);
+      mockMessage.guild = sourceGuild;
+    } catch (error) {
+      await interaction.editReply({
+        content: `❌ Could not fetch source server ${serverId}. Bot may not be in that server.`,
+      });
+      return;
+    }
+
+    let response = `🧪 **Test Results** ${
+      testEmbed ? "(Embed Test)" : "(Message Test)"
+    }\n\n`;
+    response += `📤 **Source:** ${sourceGuild.name} (${serverId})\n`;
+    response += `📝 **Channel:** <#${channelId}> (${channelInfo.channel_type})\n`;
+    response += `🎯 **Target Servers:** ${targetServers.length}\n`;
+    response += `🔗 **Link Detection:** ✅ Passed\n\n`;
+
+    if (dryRun) {
+      response += `🔍 **DRY RUN** - No messages will be sent\n`;
+      response += `📋 **Mock Message Analysis:**\n`;
+      response += `• Content: ${
+        mockMessage.content
+          ? `"${mockMessage.content.substring(0, 50)}..."`
+          : "None"
+      }\n`;
+      response += `• Embeds: ${mockMessage.embeds.length}\n`;
+      if (mockMessage.embeds.length > 0) {
+        response += `• Embed URLs: ${
+          mockMessage.embeds.filter((e) => e.url).length
+        }\n`;
+      }
+      response += `\n💡 Use \`dry_run: false\` to actually send test messages.`;
+    } else {
+      response += `🚀 **LIVE TEST** - Sending messages...\n`;
+      await interaction.editReply({ content: response });
+
+      // Process forwarding with enhanced debugging
+      const results = {
+        total: targetServers.length,
+        successful: 0,
+        failed: 0,
+        failedServers: [],
+      };
+
+      for (const server of targetServers) {
+        console.log(`\n🎯 Testing forward to server ${server.server_id}...`);
+
+        const result = await forwardMessageToServer(
+          server,
+          mockMessage,
+          channelInfo,
+          sourceGuild
+        );
+
+        if (result.success) {
+          results.successful++;
+          console.log(
+            `✅ Test forward successful to server ${server.server_id}`
+          );
+        } else {
+          results.failed++;
+          results.failedServers.push(server.server_id);
+          console.log(
+            `❌ Test forward failed to server ${server.server_id}: ${result.error}`
+          );
+        }
+      }
+
+      response += `\n✅ **Test Complete:** ${results.successful}/${results.total} successful`;
+      if (results.failed > 0) {
+        response += `\n❌ **Failed:** ${results.failedServers.join(", ")}`;
+      }
+    }
+
+    await interaction.editReply({ content: response });
+  } catch (error) {
+    console.error("Error in test command:", error);
+    await interaction.editReply({
+      content: "❌ Test failed. Check console for details.",
+    });
+  }
+}
 
 client.login(process.env.DISCORD_BOT_TOKEN);
