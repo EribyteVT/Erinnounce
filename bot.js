@@ -77,6 +77,14 @@ const commands = [
           "If true, only simulate without actually sending messages"
         )
         .setRequired(false)
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName("test_embed")
+        .setDescription(
+          "If true, test with an embed containing a link instead of text"
+        )
+        .setRequired(false)
     ),
 ].map((command) => command.toJSON());
 
@@ -198,6 +206,7 @@ async function handleTestCommand(interaction) {
     interaction.options.getString("message_content") ||
     "Test message with link: https://example.com";
   const dryRun = interaction.options.getBoolean("dry_run") ?? true; // Default to dry run
+  const testEmbed = interaction.options.getBoolean("test_embed") ?? false;
 
   await interaction.deferReply({ ephemeral: true });
 
@@ -228,10 +237,48 @@ async function handleTestCommand(interaction) {
       return;
     }
 
+    // Create mock message object for testing
+    let mockMessage;
+    if (testEmbed) {
+      // Create a message with an embed containing a link
+      mockMessage = {
+        content: "Test message with embed",
+        embeds: [
+          {
+            title: "Test Embed",
+            description: "This embed contains a link: https://example.com",
+            url: "https://example.com",
+            color: 0x0099ff,
+          },
+        ],
+        guildId: serverId,
+        guild: null, // Will be set later
+        author: {
+          defaultAvatarURL: "https://cdn.discordapp.com/embed/avatars/0.png",
+        },
+      };
+    } else {
+      // Create a regular message
+      mockMessage = {
+        content: messageContent,
+        embeds: [],
+        guildId: serverId,
+        guild: null, // Will be set later
+        author: {
+          defaultAvatarURL: "https://cdn.discordapp.com/embed/avatars/0.png",
+        },
+      };
+    }
+
     // Check if message contains a link
-    if (!containsLink(messageContent)) {
+    if (!containsLink(mockMessage)) {
+      const messageType = testEmbed ? "Test embed" : "Test message";
+      const messageDisplay = testEmbed
+        ? `embed with title "${mockMessage.embeds[0].title}" and description "${mockMessage.embeds[0].description}"`
+        : `"${messageContent}"`;
+
       await interaction.editReply({
-        content: `❌ Test message does not contain any links. Current content: "${messageContent}"`,
+        content: `❌ ${messageType} does not contain any links. Current content: ${messageDisplay}`,
       });
       return;
     }
@@ -253,6 +300,7 @@ async function handleTestCommand(interaction) {
     let sourceGuild;
     try {
       sourceGuild = await client.guilds.fetch(serverId);
+      mockMessage.guild = sourceGuild; // Set the guild in mock message
     } catch (error) {
       await interaction.editReply({
         content: `❌ Could not fetch source server ${serverId}. Make sure the bot is in that server.`,
@@ -261,10 +309,17 @@ async function handleTestCommand(interaction) {
     }
 
     const mode = dryRun ? "🔍 **DRY RUN**" : "🧪 **LIVE TEST**";
-    let response = `${mode} - Message Relay Simulation\n\n`;
+    const testType = testEmbed ? "(Embed Test)" : "(Message Test)";
+    let response = `${mode} ${testType} - Message Relay Simulation\n\n`;
     response += `📤 **Source:** ${sourceGuild.name} (${serverId})\n`;
     response += `📝 **Channel:** <#${channelId}> (${channelInfo.channel_type})\n`;
-    response += `💬 **Message:** "${messageContent}"\n`;
+
+    if (testEmbed) {
+      response += `📎 **Embed:** "${mockMessage.embeds[0].title}" - ${mockMessage.embeds[0].description}\n`;
+    } else {
+      response += `💬 **Message:** "${messageContent}"\n`;
+    }
+
     response += `🎯 **Target Servers:** ${targetServers.length}\n\n`;
 
     if (dryRun) {
@@ -294,21 +349,12 @@ async function handleTestCommand(interaction) {
       }
 
       response += `\n💡 Use \`dry_run: false\` to actually send test messages.`;
+      response += `\n🔗 Use \`test_embed: true\` to test with embed links.`;
     } else {
       // Live test - actually send messages
       response += `🚀 **Sending test messages...**\n`;
 
       await interaction.editReply({ content: response });
-
-      // Create a mock message object
-      const mockMessage = {
-        content: messageContent,
-        guildId: serverId,
-        guild: sourceGuild,
-        author: {
-          defaultAvatarURL: "https://cdn.discordapp.com/embed/avatars/0.png",
-        },
-      };
 
       // Track results
       const results = {
@@ -441,7 +487,7 @@ async function handleRetryCommand(interaction) {
     }
 
     // Check if the message contains a link
-    if (!containsLink(targetMessage.content)) {
+    if (!containsLink(targetMessage)) {
       await interaction.editReply({
         content:
           "❌ This message does not contain any links and will not be relayed.",
@@ -618,7 +664,68 @@ function containsLink(message) {
   // Regular expression to match URLs
   const urlRegex =
     /(https?:\/\/[^\s]+|www\.[^\s]+|[^\s]+\.[a-z]{2,}(?:\/[^\s]*)?)/gi;
-  return urlRegex.test(message);
+
+  // Check message content first
+  if (typeof message === "string") {
+    return urlRegex.test(message);
+  }
+
+  // For Discord message objects, check content
+  if (message.content && urlRegex.test(message.content)) {
+    return true;
+  }
+
+  // Check embeds for links
+  if (message.embeds && message.embeds.length > 0) {
+    for (const embed of message.embeds) {
+      // Check embed URL
+      if (embed.url && urlRegex.test(embed.url)) {
+        return true;
+      }
+
+      // Check embed title
+      if (embed.title && urlRegex.test(embed.title)) {
+        return true;
+      }
+
+      // Check embed description
+      if (embed.description && urlRegex.test(embed.description)) {
+        return true;
+      }
+
+      // Check embed fields
+      if (embed.fields && embed.fields.length > 0) {
+        for (const field of embed.fields) {
+          if (
+            (field.name && urlRegex.test(field.name)) ||
+            (field.value && urlRegex.test(field.value))
+          ) {
+            return true;
+          }
+        }
+      }
+
+      // Check embed footer
+      if (
+        embed.footer &&
+        embed.footer.text &&
+        urlRegex.test(embed.footer.text)
+      ) {
+        return true;
+      }
+
+      // Check embed author
+      if (
+        embed.author &&
+        embed.author.name &&
+        urlRegex.test(embed.author.name)
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 // Enhanced webhook function with retry logic
@@ -743,7 +850,7 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  if (!containsLink(message.content)) {
+  if (!containsLink(message)) {
     console.log("Message does not contain a link, skipping...");
     return;
   }
