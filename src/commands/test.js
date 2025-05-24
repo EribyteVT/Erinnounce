@@ -18,45 +18,41 @@ export async function handleTestCommand(interaction) {
   try {
     // Validate IDs
     if (!/^\d{17,19}$/.test(serverId) || !/^\d{17,19}$/.test(channelId)) {
-      await interaction.editReply({
-        content: "❌ Invalid server or channel ID format.",
-      });
+      await messageService.sendErrorResponse(interaction, 
+        "Invalid server or channel ID format."
+      );
       return;
     }
 
     // Check channel configuration
     const channelInfo = channelService.getChannelInfo(channelId);
     if (!channelInfo) {
-      await interaction.editReply({
-        content: `❌ Channel ${channelId} is not configured as an input channel.`,
-      });
+      await messageService.sendErrorResponse(interaction,
+        `Channel ${channelId} is not configured as an input channel.`
+      );
       return;
     }
 
     // Create mock message
-    const mockMessage = createMockMessage(
-      serverId,
-      messageContent,
-      testEmbed
-    );
+    const mockMessage = createMockMessage(serverId, messageContent, testEmbed);
 
     // Debug the mock message
     debugMessage(mockMessage, "Mock Test Message");
 
     // Validate links
     if (!containsLink(mockMessage)) {
-      await interaction.editReply({
-        content: `❌ Test message does not contain any links.`,
-      });
+      await messageService.sendErrorResponse(interaction,
+        "Test message does not contain any links."
+      );
       return;
     }
 
     // Get source guild
     const sourceGuild = await fetchGuild(serverId);
     if (!sourceGuild) {
-      await interaction.editReply({
-        content: `❌ Could not fetch source server ${serverId}.`,
-      });
+      await messageService.sendErrorResponse(interaction,
+        `Could not fetch source server ${serverId}.`
+      );
       return;
     }
     mockMessage.guild = sourceGuild;
@@ -70,12 +66,15 @@ export async function handleTestCommand(interaction) {
       testEmbed
     );
 
-    await interaction.editReply({ content: response });
+    await messageService.sendSuccessResponse(interaction, response, {
+      title: "🧪 Test Command Results"
+    });
+    
   } catch (error) {
     console.error("Error in test command:", error);
-    await interaction.editReply({
-      content: "❌ Test failed. Check console for details.",
-    });
+    await messageService.sendErrorResponse(interaction,
+      "Test failed. Check console for details."
+    );
   }
 }
 
@@ -157,11 +156,12 @@ async function executeTest(mockMessage, channelInfo, sourceGuild, dryRun, testEm
 
 function formatTestHeader(sourceGuild, channelInfo, targetServers, testEmbed) {
   const testType = testEmbed ? "(Embed Test)" : "(Message Test)";
-  let response = `🧪 **Test Results** ${testType}\n\n`;
+  let response = `**Test Results** ${testType}\n\n`;
   response += `📤 **Source:** ${sourceGuild.name} (${sourceGuild.id})\n`;
   response += `📝 **Channel:** <#${channelInfo.channel_id_input}> (${channelInfo.channel_type})\n`;
   response += `🎯 **Target Servers:** ${targetServers.length}\n`;
-  response += `🔗 **Link Detection:** ✅ Passed\n\n`;
+  response += `🔗 **Link Detection:** ✅ Passed\n`;
+  response += `🪝 **Method:** Webhook (Server Avatar & Name)\n\n`;
   return response;
 }
 
@@ -178,11 +178,12 @@ async function formatDryRunDetails(targetServers, channelInfo) {
     let serverInfo = await getServerInfo(server.server_id);
     serverInfo += `\n  └─ Channel: <#${server.channel_id_output}>`;
     serverInfo += `\n  └─ Role: ${role ? `<@&${role.role_id}>` : "❌ No role found"}`;
+    serverInfo += `\n  └─ Webhook: Will be created/used automatically`;
     
     response += `${serverInfo}\n`;
   }
 
-  response += `\n💡 Use \`dry_run: false\` to actually send test messages.`;
+  response += `\n💡 Use \`dry_run: false\` to actually send test messages via webhooks.`;
   return response;
 }
 
@@ -196,7 +197,7 @@ async function getServerInfo(serverId) {
 }
 
 async function executeLiveTest(mockMessage, channelInfo, targetServers, sourceGuild) {
-  let response = `🚀 **LIVE TEST** - Sending messages...\n`;
+  let response = `🚀 **LIVE TEST** - Sending messages via webhooks...\n`;
   
   const results = await messageService.forwardToServers(
     mockMessage,

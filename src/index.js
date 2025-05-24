@@ -6,6 +6,7 @@ import { handleReady } from "./handlers/readyHandler.js";
 import { handleMessageCreate } from "./handlers/messageHandler.js";
 import { handleRetryCommand } from "./commands/retry.js";
 import { handleTestCommand } from "./commands/test.js";
+import { handleTargetTestCommand } from "./commands/targetTest.js";
 
 dotenv.config();
 
@@ -31,6 +32,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       break;
     case "test":
       await handleTestCommand(interaction);
+      break;
+    case "target-test":
+      await handleTargetTestCommand(interaction);
       break;
   }
 });

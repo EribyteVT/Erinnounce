@@ -11,9 +11,9 @@ export async function handleRetryCommand(interaction) {
   try {
     // Validate message ID format
     if (!/^\d{17,19}$/.test(messageId)) {
-      await interaction.editReply({
-        content: "❌ Invalid message ID format. Please provide a valid Discord message ID.",
-      });
+      await messageService.sendErrorResponse(interaction,
+        "Invalid message ID format. Please provide a valid Discord message ID."
+      );
       return;
     }
 
@@ -21,44 +21,50 @@ export async function handleRetryCommand(interaction) {
     const { message, channel } = await findMessage(messageId, interaction.channel);
 
     if (!message) {
-      await interaction.editReply({
-        content: "❌ Message not found. Make sure the message ID is correct.",
-      });
+      await messageService.sendErrorResponse(interaction,
+        "Message not found. Make sure the message ID is correct."
+      );
       return;
     }
 
     // Validate it's from an input channel
     const allInputChannels = channelService.getAllInputChannels();
     if (!allInputChannels.includes(channel.id)) {
-      await interaction.editReply({
-        content: "❌ This message is not from a configured input channel.",
-      });
+      await messageService.sendErrorResponse(interaction,
+        "This message is not from a configured input channel."
+      );
       return;
     }
 
     // Check for links
     if (!containsLink(message)) {
-      await interaction.editReply({
-        content: "❌ This message does not contain any links.",
-      });
+      await messageService.sendErrorResponse(interaction,
+        "This message does not contain any links."
+      );
       return;
     }
 
-    await interaction.editReply({ content: "🔄 Starting message retry..." });
+    // Show progress
+    await messageService.sendInfoResponse(interaction, 
+      "🔄 Starting message retry via webhooks...",
+      { title: "Retry Command" }
+    );
 
     // Relay the message
     const results = await messageService.relayMessage(message, channel);
 
     // Update with results
     const resultMessage = formatRetryResults(results);
-    await interaction.editReply({ content: resultMessage });
+    await messageService.sendSuccessResponse(interaction, resultMessage, {
+      title: "✅ Retry Complete"
+    });
 
     console.log(`📊 Retry Summary: ${results.successful}/${results.total} successful`);
   } catch (error) {
     console.error("Error in retry command:", error);
-    await interaction.editReply({
-      content: "❌ An error occurred while retrying the message.",
-    });
+    await messageService.sendErrorResponse(interaction,
+      "An error occurred while retrying the message."
+    );
   }
 }
 
@@ -91,8 +97,7 @@ async function findMessage(messageId, currentChannel) {
 }
 
 function formatRetryResults(results) {
-  let message = `✅ **Retry Complete**\n`;
-  message += `📊 **Summary:** ${results.successful}/${results.total} successful\n`;
+  let message = `**Summary:** ${results.successful}/${results.total} successful\n`;
   message += `• Forwarded: ${results.forwardSent} | Failed: ${results.failed}`;
 
   if (results.failed > 0) {
