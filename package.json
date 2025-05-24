@@ -5,7 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "prod": "node bot.js"
+    "prod": "node src/index.js"
   },
   "keywords": [],
   "author": "",
